@@ -1,0 +1,8 @@
+services:
+  vibe-check:
+    build: .
+    ports:
+      - "8011:8000"
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1

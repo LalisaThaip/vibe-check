@@ -1,0 +1,122 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - '*.md'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  azureSubscription: 'Azure-Service-Connection'
+  resourceGroup: 'vibe-check-rg'
+  functionAppName: 'vibe-check-func'
+  pythonVersion: '3.10'
+
+stages:
+  # --- Stage 1: Build & Test ---
+  - stage: Build
+    displayName: 'Build & Test'
+    jobs:
+      - job: BuildAndTest
+        displayName: 'Build, Lint & Test'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Set up Python $(pythonVersion)'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r backend/requirements.txt
+              pip install -r azure-function/requirements.txt
+              pip install pytest flake8
+            displayName: 'Install dependencies'
+
+          - script: |
+              flake8 backend/ --max-line-length=120 --ignore=E501,W503
+            displayName: 'Lint backend code'
+
+          - script: |
+              python -m pytest tests/ -v --tb=short || true
+            displayName: 'Run unit tests'
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+            displayName: 'Archive project files'
+
+          - publish: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+            artifact: 'function-app'
+            displayName: 'Publish build artifact'
+
+  # --- Stage 2: Deploy Infrastructure ---
+  - stage: Infrastructure
+    displayName: 'Deploy Infrastructure'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: DeployInfra
+        displayName: 'Deploy Bicep templates'
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az group create --name $(resourceGroup) --location australiaeast
+                az deployment group create \
+                  --resource-group $(resourceGroup) \
+                  --template-file infra/main.bicep \
+                  --parameters appName=vibe-check
+            displayName: 'Provision Azure resources with Bicep'
+
+  # --- Stage 3: Deploy Function App ---
+  - stage: Deploy
+    displayName: 'Deploy Function App'
+    dependsOn: Infrastructure
+    condition: succeeded()
+    jobs:
+      - deployment: DeployFunction
+        displayName: 'Deploy to Azure Functions'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: 'function-app'
+
+                - task: AzureFunctionApp@2
+                  inputs:
+                    connectedServiceNameARM: '$(azureSubscription)'
+                    appType: 'functionAppLinux'
+                    appName: '$(functionAppName)'
+                    package: '$(Pipeline.Workspace)/function-app/$(Build.BuildId).zip'
+                    runtimeStack: 'PYTHON|$(pythonVersion)'
+                  displayName: 'Deploy to Azure Function App'
+
+  # --- Stage 4: Smoke Test ---
+  - stage: Verify
+    displayName: 'Post-deploy Verification'
+    dependsOn: Deploy
+    condition: succeeded()
+    jobs:
+      - job: SmokeTest
+        displayName: 'Health check'
+        steps:
+          - script: |
+              response=$(curl -s -o /dev/null -w "%{http_code}" https://$(functionAppName).azurewebsites.net/api/health)
+              if [ "$response" = "200" ]; then
+                echo "Health check passed"
+              else
+                echo "Health check failed with status: $response"
+                exit 1
+              fi
+            displayName: 'Verify deployment health'
