@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 
 interface Props {
   onUpload: (file: File) => void
@@ -12,6 +12,17 @@ export default function UploadZone({ onUpload }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+
+  // Attach the live camera stream to the preview once the <video> element is
+  // actually mounted. startRecording() flips isRecording BEFORE this element
+  // exists, so assigning srcObject there would hit a null ref (that's why the
+  // preview showed no face). Running it here, after render, fixes the mirror.
+  useEffect(() => {
+    if (isRecording && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current
+      videoRef.current.play().catch(() => {})
+    }
+  }, [isRecording])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -32,10 +43,8 @@ export default function UploadZone({ onUpload }: Props) {
         audio: true,
       })
       streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        videoRef.current.play()
-      }
+      // The preview <video> isn't mounted yet — the useEffect above attaches
+      // the stream once isRecording flips true and the element renders.
 
       const chunks: Blob[] = []
       const mr = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9,opus' })
@@ -65,7 +74,7 @@ export default function UploadZone({ onUpload }: Props) {
     return (
       <div className="flex flex-col items-center gap-6">
         <div className="relative rounded-2xl overflow-hidden border-2 border-red-500/50 shadow-lg shadow-red-500/20">
-          <video ref={videoRef} muted className="w-80 h-auto rounded-2xl transform -scale-x-100" />
+          <video ref={videoRef} muted autoPlay playsInline className="w-80 h-auto rounded-2xl transform -scale-x-100" />
           <div className="absolute top-3 left-3 flex items-center gap-2 bg-red-500/80 px-3 py-1 rounded-full text-sm font-medium">
             <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
             Recording
